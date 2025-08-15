@@ -4,6 +4,7 @@ import os
 import time
 import asyncio
 import logging
+import json
 from mcp.server.fastmcp import FastMCP
 
 # --- Configuration & Constants ---
@@ -106,10 +107,73 @@ async def get_available_templates() -> str:
     return formatted_templates.strip()
 
 @mcp.tool()
-async def generate_powerpoint(plain_text: str, length: int, template: str) -> str:
+async def get_me() -> str:
     """
-    Generate a PowerPoint presentation based on text, length, and template.
+    Get details about the current API key (user_name and remaining credits).
+    """
+    if not API_KEY:
+        return "API Key is missing. Cannot process any requests."
+
+    result = await _make_api_request("GET", "/me")
+    if not result:
+        return "Failed to fetch current user details."
+    return json.dumps(result) + "\n Note: Generating slides costs 1 credit / slide"
+
+@mcp.tool()
+async def generate_powerpoint(
+    plain_text: str,
+    length: int,
+    template: str,
+    document_uuids: Optional[list[str]] = None,
+    *,
+    language: Optional[str] = "ORIGINAL",
+    fetch_images: Optional[bool] = True,
+    use_document_images: Optional[bool] = False,
+    tone: Optional[Literal['default','casual','professional','funny','educational','sales_pitch']] = 'default',
+    verbosity: Optional[Literal['concise','standard','text-heavy']] = 'standard',
+    custom_user_instructions: Optional[str] = None,
+    include_cover: Optional[bool] = True,
+    include_table_of_contents: Optional[bool] = True,
+    add_speaker_notes: Optional[bool] = False,
+    use_general_knowledge: Optional[bool] = False,
+    use_wording_from_document: Optional[bool] = False,
+    response_format: Optional[Literal['powerpoint','pdf']] = 'powerpoint',
+    use_branding_logo: Optional[bool] = False,
+    use_branding_fonts: Optional[bool] = False,
+    use_branding_color: Optional[bool] = False,
+    branding_logo: Optional[str] = None,
+    branding_fonts: Optional[dict[str, str]] = None,
+) -> str:
+    """
+    Generate a PowerPoint or PDF presentation based on text, length, and template.
+    Supports optional settings (language, tone, verbosity, images, structure, etc.).
     Waits up to a configured time for the result.
+
+    Parameters:
+    Required:
+    - plain_text (str): The topic to generate a presentation about
+    - length (int): The number of slides
+    - template (str): Template name or ID
+
+    Optional:
+    - document_uuids (list[str]): UUIDs of uploaded documents to use
+    - language (str): Language code (default: 'ORIGINAL')
+    - fetch_images (bool): Include stock images (default: True)
+    - use_document_images (bool): Include images from documents (default: False)
+    - tone (str): Text tone - 'default', 'casual', 'professional', 'funny', 'educational', 'sales_pitch' (default: 'default')
+    - verbosity (str): Text length - 'concise', 'standard', 'text-heavy' (default: 'standard')
+    - custom_user_instructions (str): Custom generation instructions
+    - include_cover (bool): Include cover slide (default: True)
+    - include_table_of_contents (bool): Include TOC slides (default: True)
+    - add_speaker_notes (bool): Add speaker notes (default: False)
+    - use_general_knowledge (bool): Expand with related info (default: False)
+    - use_wording_from_document (bool): Use document wording (default: False)
+    - response_format (str): 'powerpoint' or 'pdf' (default: 'powerpoint')
+    - use_branding_logo (bool): Include brand logo (default: False)
+    - use_branding_fonts (bool): Apply brand fonts (default: False)
+    - use_branding_color (bool): Apply brand colors (default: False)
+    - branding_logo (str): Custom logo URL
+    - branding_fonts (dict): The object of brand fonts to be used in the slides
     """
     generation_endpoint = "/presentation/generate"
     status_endpoint_base = "/task_status" # Base path for status checks
@@ -118,11 +182,53 @@ async def generate_powerpoint(plain_text: str, length: int, template: str) -> st
         return "API Key is missing. Cannot process any requests."
 
     # Prepare the JSON body for the generation request
-    payload = {
+    # Validate cross-field requirements
+    if (use_document_images or use_wording_from_document) and not document_uuids:
+        return (
+            "When use_document_images or use_wording_from_document is true, you must provide document_uuids."
+        )
+
+    payload: dict[str, Any] = {
         "plain_text": plain_text,
         "length": length,
-        "template": template
+        "template": template,
     }
+    if document_uuids:
+        payload["document_uuids"] = document_uuids
+    if language:
+        payload["language"] = language
+    if fetch_images:
+        payload["fetch_images"] = fetch_images
+    if use_document_images:
+        payload["use_document_images"] = use_document_images
+    if tone:
+        payload["tone"] = tone
+    if verbosity:
+        payload["verbosity"] = verbosity
+    if custom_user_instructions is not None and custom_user_instructions.strip():
+        payload["custom_user_instructions"] = custom_user_instructions
+    if include_cover:
+        payload["include_cover"] = include_cover
+    if include_table_of_contents:
+        payload["include_table_of_contents"] = include_table_of_contents
+    if add_speaker_notes:
+        payload["add_speaker_notes"] = add_speaker_notes
+    if use_general_knowledge:
+        payload["use_general_knowledge"] = use_general_knowledge
+    if use_wording_from_document:
+        payload["use_wording_from_document"] = use_wording_from_document
+    if response_format:
+        payload["response_format"] = response_format
+    if use_branding_logo:
+        payload["use_branding_logo"] = use_branding_logo
+    if use_branding_fonts:
+        payload["use_branding_fonts"] = use_branding_fonts
+    if use_branding_color:
+        payload["use_branding_color"] = use_branding_color
+    if branding_logo:
+        payload["branding_logo"] = branding_logo
+    if branding_fonts:
+        payload["branding_fonts"] = branding_fonts
 
     # Step 1: Initiate generation (POST request)
     init_result = await _make_api_request("POST", generation_endpoint, payload=payload, timeout=GENERATION_TIMEOUT)
@@ -302,6 +408,52 @@ async def generate_slide_by_slide(
         return (
             f"Timeout while waiting for slide-by-slide generation (Task ID: {task_id}). The task might still be running."
         )
+
+@mcp.tool()
+async def get_task_status(task_id: str) -> str:
+    """
+    Get the current task status and result by task_id.
+    """
+    if not API_KEY:
+        return "API Key is missing. Cannot process any requests."
+    status = await _make_api_request("GET", f"/task_status/{task_id}", timeout=POLLING_TIMEOUT)
+    if not status:
+        return f"Failed to fetch status for task {task_id}."
+    return json.dumps(status)
+
+@mcp.tool()
+async def upload_document(file_path: str) -> str:
+    """
+    Upload a document file and return the task_id for processing.
+    Supported file types: .pptx, .ppt, .docx, .doc, .xlsx, .pdf
+    """
+    if not API_KEY:
+        return "API Key is missing. Cannot process any requests."
+
+    url = f"{API_BASE}/document/upload"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "X-API-Key": API_KEY,
+    }
+
+    # Validate path
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            with open(file_path, "rb") as f:
+                files = {"file": (os.path.basename(file_path), f)}
+                response = await client.post(url, headers=headers, files=files)
+                response.raise_for_status()
+                data = response.json()
+                return json.dumps(data)
+    except httpx.HTTPStatusError as e:
+        logging.error(f"HTTP error uploading document: {e.response.status_code} - {e.response.text}")
+        return f"Upload failed: {e.response.status_code} {e.response.text}"
+    except Exception as e:
+        logging.error(f"Unexpected error uploading document: {str(e)}")
+        return f"Upload failed: {str(e)}"
 
 
 if __name__ == "__main__":
