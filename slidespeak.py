@@ -125,10 +125,55 @@ async def generate_powerpoint(
     length: int,
     template: str,
     document_uuids: Optional[list[str]] = None,
+    *,
+    language: Optional[str] = "ORIGINAL",
+    fetch_images: Optional[bool] = True,
+    use_document_images: Optional[bool] = False,
+    tone: Optional[Literal['default','casual','professional','funny','educational','sales_pitch']] = 'default',
+    verbosity: Optional[Literal['concise','standard','text-heavy']] = 'standard',
+    custom_user_instructions: Optional[str] = None,
+    include_cover: Optional[bool] = True,
+    include_table_of_contents: Optional[bool] = True,
+    add_speaker_notes: Optional[bool] = False,
+    use_general_knowledge: Optional[bool] = False,
+    use_wording_from_document: Optional[bool] = False,
+    response_format: Optional[Literal['powerpoint','pdf']] = 'powerpoint',
+    use_branding_logo: Optional[bool] = False,
+    use_branding_fonts: Optional[bool] = False,
+    use_branding_color: Optional[bool] = False,
+    branding_logo: Optional[str] = None,
+    branding_fonts: Optional[dict[str, str]] = None,
 ) -> str:
     """
-    Generate a PowerPoint presentation based on text, length, and template.
+    Generate a PowerPoint or PDF presentation based on text, length, and template.
+    Supports optional settings (language, tone, verbosity, images, structure, etc.).
     Waits up to a configured time for the result.
+
+    Parameters:
+    Required:
+    - plain_text (str): The topic to generate a presentation about
+    - length (int): The number of slides
+    - template (str): Template name or ID
+
+    Optional:
+    - document_uuids (list[str]): UUIDs of uploaded documents to use
+    - language (str): Language code (default: 'ORIGINAL')
+    - fetch_images (bool): Include stock images (default: True)
+    - use_document_images (bool): Include images from documents (default: False)
+    - tone (str): Text tone - 'default', 'casual', 'professional', 'funny', 'educational', 'sales_pitch' (default: 'default')
+    - verbosity (str): Text length - 'concise', 'standard', 'text-heavy' (default: 'standard')
+    - custom_user_instructions (str): Custom generation instructions
+    - include_cover (bool): Include cover slide (default: True)
+    - include_table_of_contents (bool): Include TOC slides (default: True)
+    - add_speaker_notes (bool): Add speaker notes (default: False)
+    - use_general_knowledge (bool): Expand with related info (default: False)
+    - use_wording_from_document (bool): Use document wording (default: False)
+    - response_format (str): 'powerpoint' or 'pdf' (default: 'powerpoint')
+    - use_branding_logo (bool): Include brand logo (default: False)
+    - use_branding_fonts (bool): Apply brand fonts (default: False)
+    - use_branding_color (bool): Apply brand colors (default: False)
+    - branding_logo (str): Custom logo URL
+    - branding_fonts (dict): The object of brand fonts to be used in the slides
     """
     generation_endpoint = "/presentation/generate"
     status_endpoint_base = "/task_status" # Base path for status checks
@@ -137,13 +182,53 @@ async def generate_powerpoint(
         return "API Key is missing. Cannot process any requests."
 
     # Prepare the JSON body for the generation request
+    # Validate cross-field requirements
+    if (use_document_images or use_wording_from_document) and not document_uuids:
+        return (
+            "When use_document_images or use_wording_from_document is true, you must provide document_uuids."
+        )
+
     payload: dict[str, Any] = {
         "plain_text": plain_text,
         "length": length,
-        "template": template
+        "template": template,
     }
     if document_uuids:
         payload["document_uuids"] = document_uuids
+    if language:
+        payload["language"] = language
+    if fetch_images:
+        payload["fetch_images"] = fetch_images
+    if use_document_images:
+        payload["use_document_images"] = use_document_images
+    if tone:
+        payload["tone"] = tone
+    if verbosity:
+        payload["verbosity"] = verbosity
+    if custom_user_instructions is not None and custom_user_instructions.strip():
+        payload["custom_user_instructions"] = custom_user_instructions
+    if include_cover:
+        payload["include_cover"] = include_cover
+    if include_table_of_contents:
+        payload["include_table_of_contents"] = include_table_of_contents
+    if add_speaker_notes:
+        payload["add_speaker_notes"] = add_speaker_notes
+    if use_general_knowledge:
+        payload["use_general_knowledge"] = use_general_knowledge
+    if use_wording_from_document:
+        payload["use_wording_from_document"] = use_wording_from_document
+    if response_format:
+        payload["response_format"] = response_format
+    if use_branding_logo:
+        payload["use_branding_logo"] = use_branding_logo
+    if use_branding_fonts:
+        payload["use_branding_fonts"] = use_branding_fonts
+    if use_branding_color:
+        payload["use_branding_color"] = use_branding_color
+    if branding_logo:
+        payload["branding_logo"] = branding_logo
+    if branding_fonts:
+        payload["branding_fonts"] = branding_fonts
 
     # Step 1: Initiate generation (POST request)
     init_result = await _make_api_request("POST", generation_endpoint, payload=payload, timeout=GENERATION_TIMEOUT)
