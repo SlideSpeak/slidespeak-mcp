@@ -107,6 +107,31 @@ async def get_available_templates() -> str:
     return formatted_templates.strip()
 
 @mcp.tool()
+async def get_branded_templates() -> str:
+    """Get all available branded presentation templates."""
+    branded_templates_endpoint = "/presentation/templates/branded"
+
+    if not API_KEY:
+        return "API Key is missing. Cannot process any requests."
+
+    templates_data = await _make_api_request("GET", branded_templates_endpoint)
+
+    if not templates_data:
+        return "No branded templates available. Add some using the web app"
+
+    if not isinstance(templates_data, list):
+         return f"Unexpected response format received for branded templates: {type(templates_data).__name__}"
+
+    formatted_templates = "Available branded templates:\n"
+    for template in templates_data:
+        # Add robust checking for expected keys
+        template_id = template.get("id", "Unknown ID")
+        name = template.get("name", "Unknown name")
+        formatted_templates += f"- {name} (ID: {template_id})\n"
+
+    return formatted_templates.strip()
+
+@mcp.tool()
 async def get_me() -> str:
     """
     Get details about the current API key (user_name and remaining credits).
@@ -153,7 +178,7 @@ async def generate_powerpoint(
     Required:
     - plain_text (str): The topic to generate a presentation about
     - length (int): The number of slides
-    - template (str): Template name or ID
+    - template (str): Template name for a regular template or ID of a branded template
 
     Optional:
     - document_uuids (list[str]): UUIDs of uploaded documents to use
@@ -299,7 +324,7 @@ async def generate_slide_by_slide(
     Generate a PowerPoint presentation using Slide-by-Slide input.
 
     Parameters
-    - template (string): The name of the template or the ID of a custom template. See the custom templates section for more information.
+    - template (string): The name of the template or the ID of a branded template.
     - language (string, optional): Language code like 'ENGLISH' or 'ORIGINAL'.
     - include_cover (bool, optional): Whether to include a cover slide in addition to the specified slides.
     - include_table_of_contents (bool, optional): Whether to include the ‘table of contents’ slides.
