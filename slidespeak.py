@@ -21,7 +21,7 @@ if not API_KEY:
 
 # Timeouts
 DEFAULT_TIMEOUT = 30.0
-GENERATION_TIMEOUT = 30.0  # Timeout for the initial generation POST request
+GENERATION_TIMEOUT = 60.0  # Timeout for the initial generation POST request
 POLLING_TIMEOUT = 10.0  # Timeout for each individual status check request
 
 
@@ -93,9 +93,6 @@ async def get_available_templates() -> str:
 
     if not isinstance(templates_data, list):
          return f"Unexpected response format received for templates: {type(templates_data).__name__}"
-
-    if not templates_data:
-        return "No templates available."
 
     formatted_templates = "Available templates:\n"
     for template in templates_data:
@@ -201,39 +198,39 @@ async def generate_powerpoint(
     }
     if document_uuids:
         payload["document_uuids"] = document_uuids
-    if language:
+    if language is not None:
         payload["language"] = language
-    if fetch_images:
+    if fetch_images is not None:
         payload["fetch_images"] = fetch_images
-    if use_document_images:
+    if use_document_images is not None:
         payload["use_document_images"] = use_document_images
-    if tone:
+    if tone is not None:
         payload["tone"] = tone
-    if verbosity:
+    if verbosity is not None:
         payload["verbosity"] = verbosity
     if custom_user_instructions is not None and custom_user_instructions.strip():
         payload["custom_user_instructions"] = custom_user_instructions
-    if include_cover:
+    if include_cover is not None:
         payload["include_cover"] = include_cover
-    if include_table_of_contents:
+    if include_table_of_contents is not None:
         payload["include_table_of_contents"] = include_table_of_contents
-    if add_speaker_notes:
+    if add_speaker_notes is not None:
         payload["add_speaker_notes"] = add_speaker_notes
-    if use_general_knowledge:
+    if use_general_knowledge is not None:
         payload["use_general_knowledge"] = use_general_knowledge
-    if use_wording_from_document:
+    if use_wording_from_document is not None:
         payload["use_wording_from_document"] = use_wording_from_document
-    if response_format:
+    if response_format is not None:
         payload["response_format"] = response_format
-    if use_branding_logo:
+    if use_branding_logo is not None:
         payload["use_branding_logo"] = use_branding_logo
-    if use_branding_fonts:
+    if use_branding_fonts is not None:
         payload["use_branding_fonts"] = use_branding_fonts
-    if use_branding_color:
+    if use_branding_color is not None:
         payload["use_branding_color"] = use_branding_color
-    if branding_logo:
+    if branding_logo is not None:
         payload["branding_logo"] = branding_logo
-    if branding_fonts:
+    if branding_fonts is not None:
         payload["branding_fonts"] = branding_fonts
 
     # Initiate generation — returns immediately with task_id
@@ -397,7 +394,7 @@ async def download_presentation(request_id: str) -> str:
     if not API_KEY:
         return "API Key is missing. Cannot process any requests."
 
-    result = await _make_api_request("GET", f"/presentation/{request_id}/download", timeout=DEFAULT_TIMEOUT)
+    result = await _make_api_request("GET", f"/presentation/download/{request_id}", timeout=DEFAULT_TIMEOUT)
     if not result:
         return f"Failed to get download URL for request {request_id}."
 
