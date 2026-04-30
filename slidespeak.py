@@ -2,7 +2,6 @@ from typing import Any, Optional, Literal
 import httpx
 import os
 import time
-import asyncio
 import logging
 import json
 from mcp.server.fastmcp import FastMCP
@@ -20,11 +19,11 @@ API_KEY = os.environ.get('SLIDESPEAK_API_KEY')
 if not API_KEY:
     logging.warning("SLIDESPEAK_API_KEY environment variable not set.")
 
-# Default Timeouts
+# Timeouts
 DEFAULT_TIMEOUT = 30.0
-GENERATION_TIMEOUT = 90.0 # Total time allowed for generation + polling
-POLLING_INTERVAL = 2.0 # Seconds between status checks
-POLLING_TIMEOUT = 10.0 # Timeout for each individual status check request
+GENERATION_TIMEOUT = 30.0  # Timeout for the initial generation POST request
+POLLING_TIMEOUT = 10.0  # Timeout for each individual status check request
+
 
 async def _make_api_request(
     method: Literal["GET", "POST"],
@@ -54,27 +53,30 @@ async def _make_api_request(
         "X-API-Key": API_KEY,
     }
 
-    # Construct full URL
     url = f"{API_BASE}{endpoint}"
+    req_start = time.time()
 
     async with httpx.AsyncClient() as client:
         try:
             if method == "POST":
                 response = await client.post(url, json=payload, headers=headers, timeout=timeout)
-            else: # Default to GET
+            else:
                 response = await client.get(url, headers=headers, timeout=timeout)
 
-            response.raise_for_status() # Raise exception for 4xx or 5xx status codes
+            elapsed = time.time() - req_start
+            logging.info(f"{method} {url} | status={response.status_code} | elapsed={elapsed:.2f}s")
+            response.raise_for_status()
             return response.json()
 
         except httpx.HTTPStatusError as e:
-            logging.error(f"HTTP error calling {method} {url}: {e.response.status_code} - {e.response.text}")
+            logging.error(f"HTTP error {method} {url}: {e.response.status_code} - {e.response.text}")
         except httpx.RequestError as e:
-            logging.error(f"Request error calling {method} {url}: {str(e)}")
+            logging.error(f"Request error {method} {url}: {str(e)}")
         except Exception as e:
-            logging.error(f"An unexpected error occurred calling {method} {url}: {str(e)}")
+            logging.error(f"Unexpected error {method} {url}: {str(e)}")
 
         return None
+
 
 @mcp.tool()
 async def get_available_templates() -> str:
@@ -97,7 +99,6 @@ async def get_available_templates() -> str:
 
     formatted_templates = "Available templates:\n"
     for template in templates_data:
-        # Add more robust checking for expected keys
         name = template.get("name", "default")
         images = template.get("images", {})
         cover = images.get("cover", "No cover image URL")
@@ -105,6 +106,7 @@ async def get_available_templates() -> str:
         formatted_templates += f"- {name}\n  Cover: {cover}\n  Content: {content}\n\n"
 
     return formatted_templates.strip()
+
 
 @mcp.tool()
 async def get_me() -> str:
@@ -118,6 +120,7 @@ async def get_me() -> str:
     if not result:
         return "Failed to fetch current user details."
     return json.dumps(result) + "\n Note: Generating slides costs 1 credit / slide"
+
 
 @mcp.tool()
 async def generate_powerpoint(
@@ -145,9 +148,14 @@ async def generate_powerpoint(
     branding_fonts: Optional[dict[str, str]] = None,
 ) -> str:
     """
-    Generate a PowerPoint or PDF presentation based on text, length, and template.
-    Supports optional settings (language, tone, verbosity, images, structure, etc.).
-    Waits up to a configured time for the result.
+    Generate a PowerPoint presentation from text content using specified template.
+    Returns a task_id that can be used with getTaskStatus to check progress.
+    When the task completes, the result will contain a presentation_id and request_id.
+    Use the request_id with the downloadPresentation tool to get the download URL.
+
+    IMPORTANT: This tool returns immediately with a task_id. You MUST then call
+    getTaskStatus with the task_id to poll for completion. Keep polling every few
+    seconds until the status is SUCCESS or FAILED.
 
     Parameters:
     Required:
@@ -176,12 +184,10 @@ async def generate_powerpoint(
     - branding_fonts (dict): The object of brand fonts to be used in the slides
     """
     generation_endpoint = "/presentation/generate"
-    status_endpoint_base = "/task_status" # Base path for status checks
 
     if not API_KEY:
         return "API Key is missing. Cannot process any requests."
 
-    # Prepare the JSON body for the generation request
     # Validate cross-field requirements
     if (use_document_images or use_wording_from_document) and not document_uuids:
         return (
@@ -230,7 +236,7 @@ async def generate_powerpoint(
     if branding_fonts:
         payload["branding_fonts"] = branding_fonts
 
-    # Step 1: Initiate generation (POST request)
+    # Initiate generation — returns immediately with task_id
     init_result = await _make_api_request("POST", generation_endpoint, payload=payload, timeout=GENERATION_TIMEOUT)
 
     if not init_result:
@@ -242,50 +248,12 @@ async def generate_powerpoint(
 
     logging.info(f"PowerPoint generation initiated. Task ID: {task_id}")
 
-    # Step 2: Poll for the task status
-    status_endpoint = f"{status_endpoint_base}/{task_id}"
-    start_time = time.time()
-    final_result = None
-
-    while time.time() - start_time < GENERATION_TIMEOUT:
-        logging.debug(f"Polling status for task {task_id}...")
-        status_result = await _make_api_request("GET", status_endpoint, timeout=POLLING_TIMEOUT)
-
-        if status_result:
-            task_status = status_result.get("task_status")
-            task_result = status_result.get("task_result") # Assuming result might be here
-
-            if task_status == "SUCCESS":
-                logging.info(f"Task {task_id} completed successfully.")
-                # Prefer task_result if available, otherwise return the whole status dict as string
-                final_result = str(task_result) if task_result else str(status_result)
-
-                final_result = f"Make sure to return the pptx url to the user if available. Here is the result: {final_result}"
-                break
-            elif task_status == "FAILED": # Use 'FAILED' consistently if possible in API
-                logging.error(f"Task {task_id} failed. Status response: {status_result}")
-                error_message = task_result.get("error", "Unknown error") if isinstance(task_result, dict) else "Unknown error"
-                final_result = f"PowerPoint generation failed for task {task_id}. Reason: {error_message}"
-                break
-            elif task_status == "PENDING" or task_status == "PROCESSING" or task_status == "SENT": # Add other intermediate states if known
-                logging.debug(f"Task {task_id} status: {task_status}. Waiting...")
-            else:
-                 logging.warning(f"Task {task_id} has unknown status: {task_status}. Response: {status_result}")
-                 # Continue polling, but log this unexpected state
-
-        else:
-            # Failure during polling
-            logging.warning(f"Failed to get status for task {task_id} during polling. Will retry.")
-            # Optionally add a counter to break after several consecutive polling failures
-
-        await asyncio.sleep(POLLING_INTERVAL) # Use asyncio.sleep in async functions
-
-    # After loop: check if we got a result or timed out
-    if final_result:
-        return final_result
-    else:
-        logging.warning(f"Timeout ({GENERATION_TIMEOUT}s) while waiting for PowerPoint generation task {task_id}.")
-        return f"Timeout while waiting for PowerPoint generation (Task ID: {task_id}). The task might still be running."
+    return (
+        f"Generation started. Task ID: {task_id}\n\n"
+        f"The presentation is being generated. Use getTaskStatus with task_id '{task_id}' "
+        f"to check progress. Poll every few seconds until status is SUCCESS.\n"
+        f"Once complete, use downloadPresentation with the request_id from the task result."
+    )
 
 
 @mcp.tool()
@@ -297,12 +265,16 @@ async def generate_slide_by_slide(
 ) -> str:
     """
     Generate a PowerPoint presentation using Slide-by-Slide input.
+    Returns a task_id that can be used with getTaskStatus to check progress.
+
+    IMPORTANT: This tool returns immediately with a task_id. You MUST then call
+    getTaskStatus with the task_id to poll for completion. Keep polling every few
+    seconds until the status is SUCCESS or FAILED.
 
     Parameters
-    - template (string): The name of the template or the ID of a custom template. See the custom templates section for more information.
+    - template (string): The name of the template or the ID of a custom template.
     - language (string, optional): Language code like 'ENGLISH' or 'ORIGINAL'.
-    - include_cover (bool, optional): Whether to include a cover slide in addition to the specified slides.
-    - include_table_of_contents (bool, optional): Whether to include the ‘table of contents’ slides.
+    - fetch_images (bool, optional): Include stock images (default: True).
     - slides (list[dict]): A list of slides, each defined as a dictionary with the following keys:
       - title (string): The title of the slide.
       - layout (string): The layout type for the slide. See available layout options below.
@@ -326,16 +298,13 @@ async def generate_slide_by_slide(
     - thanks: 0 items
 
     Returns
-    - A string containing the final task result (including the PPTX URL when available),
-      or an error/timeout message.
+    - A string with the task_id and instructions to poll for status.
     """
     endpoint = "/presentation/generate/slide-by-slide"
-    status_endpoint_base = "/task_status"
 
     if not API_KEY:
         return "API Key is missing. Cannot process any requests."
 
-    # Basic validation
     if not isinstance(slides, list) or len(slides) == 0:
         return "Parameter 'slides' must be a non-empty list of slide objects."
 
@@ -348,7 +317,7 @@ async def generate_slide_by_slide(
     if fetch_images is not None:
         payload["fetch_images"] = fetch_images
 
-    # Step 1: Initiate slide-by-slide generation
+    # Initiate generation — returns immediately with task_id
     init_result = await _make_api_request("POST", endpoint, payload=payload, timeout=GENERATION_TIMEOUT)
     if not init_result:
         return "Failed to initiate slide-by-slide generation due to an API error. Check server logs."
@@ -359,67 +328,81 @@ async def generate_slide_by_slide(
 
     logging.info(f"Slide-by-slide generation initiated. Task ID: {task_id}")
 
-    # Step 2: Poll for the task status
-    status_endpoint = f"{status_endpoint_base}/{task_id}"
-    start_time = time.time()
-    final_result: Optional[str] = None
+    return (
+        f"Generation started. Task ID: {task_id}\n\n"
+        f"The presentation is being generated. Use getTaskStatus with task_id '{task_id}' "
+        f"to check progress. Poll every few seconds until status is SUCCESS.\n"
+        f"Once complete, use downloadPresentation with the request_id from the task result."
+    )
 
-    while time.time() - start_time < GENERATION_TIMEOUT:
-        logging.debug(f"Polling status for task {task_id} (slide-by-slide)...")
-        status_result = await _make_api_request("GET", status_endpoint, timeout=POLLING_TIMEOUT)
-
-        if status_result:
-            task_status = status_result.get("task_status")
-            task_result = status_result.get("task_result")
-
-            if task_status == "SUCCESS":
-                logging.info(f"Task {task_id} completed successfully (slide-by-slide).")
-                final_result = str(task_result) if task_result else str(status_result)
-                final_result = (
-                    f"Make sure to return the pptx url to the user if available. Here is the result: {final_result}"
-                )
-                break
-            elif task_status == "FAILED":
-                logging.error(f"Task {task_id} failed (slide-by-slide). Status response: {status_result}")
-                error_message = (
-                    task_result.get("error", "Unknown error") if isinstance(task_result, dict) else "Unknown error"
-                )
-                final_result = f"Slide-by-slide generation failed for task {task_id}. Reason: {error_message}"
-                break
-            elif task_status in ("PENDING", "PROCESSING", "SENT"):
-                logging.debug(f"Task {task_id} status: {task_status}. Waiting...")
-            else:
-                logging.warning(
-                    f"Task {task_id} has unknown status: {task_status}. Response: {status_result}"
-                )
-        else:
-            logging.warning(
-                f"Failed to get status for task {task_id} during polling (slide-by-slide). Will retry."
-            )
-
-        await asyncio.sleep(POLLING_INTERVAL)
-
-    if final_result:
-        return final_result
-    else:
-        logging.warning(
-            f"Timeout ({GENERATION_TIMEOUT}s) while waiting for slide-by-slide task {task_id}."
-        )
-        return (
-            f"Timeout while waiting for slide-by-slide generation (Task ID: {task_id}). The task might still be running."
-        )
 
 @mcp.tool()
 async def get_task_status(task_id: str) -> str:
     """
-    Get the current task status and result by task_id.
+    Get the current task status and result by task ID.
+    When the task completes, the result will contain a request_id.
+    Use the request_id with the downloadPresentation tool to get the download URL.
+
+    Possible statuses:
+    - PENDING: Task is queued
+    - SENT: Task has been sent for processing
+    - PROCESSING: Task is being processed
+    - SUCCESS: Task completed — result contains presentation_id and request_id
+    - FAILED: Task failed — result contains error details
+
+    If status is PENDING, SENT, or PROCESSING, poll again in a few seconds.
     """
     if not API_KEY:
         return "API Key is missing. Cannot process any requests."
+
     status = await _make_api_request("GET", f"/task_status/{task_id}", timeout=POLLING_TIMEOUT)
     if not status:
         return f"Failed to fetch status for task {task_id}."
+
+    task_status = status.get("task_status")
+    task_result = status.get("task_result")
+
+    if task_status == "SUCCESS":
+        request_id = None
+        if isinstance(task_result, dict):
+            request_id = task_result.get("request_id")
+
+        result_str = json.dumps(status)
+        if request_id:
+            result_str += (
+                f"\n\nThe presentation is ready! Use downloadPresentation with "
+                f"request_id '{request_id}' to get the download URL."
+            )
+        return result_str
+
+    elif task_status == "FAILED":
+        return f"Task {task_id} failed. Details: {json.dumps(status)}"
+
+    elif task_status in ("PENDING", "SENT", "PROCESSING"):
+        return (
+            f"Task {task_id} is still {task_status.lower()}. "
+            f"Please call getTaskStatus again in a few seconds."
+        )
+
     return json.dumps(status)
+
+
+@mcp.tool()
+async def download_presentation(request_id: str) -> str:
+    """
+    Get the download URL for a generated presentation.
+    Use the request_id returned by getTaskStatus (from a completed generation task)
+    to get a temporary download link.
+    """
+    if not API_KEY:
+        return "API Key is missing. Cannot process any requests."
+
+    result = await _make_api_request("GET", f"/presentation/{request_id}/download", timeout=DEFAULT_TIMEOUT)
+    if not result:
+        return f"Failed to get download URL for request {request_id}."
+
+    return f"Make sure to return the download URL to the user. Result: {json.dumps(result)}"
+
 
 @mcp.tool()
 async def upload_document(file_path: str) -> str:
@@ -436,7 +419,6 @@ async def upload_document(file_path: str) -> str:
         "X-API-Key": API_KEY,
     }
 
-    # Validate path
     if not os.path.isfile(file_path):
         return f"File not found: {file_path}"
 
@@ -457,15 +439,9 @@ async def upload_document(file_path: str) -> str:
 
 
 if __name__ == "__main__":
-    # Configure logging (optional but recommended)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    # Check for API Key at startup
     if not API_KEY:
        logging.critical("SLIDESPEAK_API_KEY is not set. The server cannot communicate with the backend API.")
-       # Optionally exit here if the API key is absolutely required
-       # import sys
-       # sys.exit("API Key missing. Exiting.")
 
-    # Initialize and run the server
     mcp.run(transport='stdio')
